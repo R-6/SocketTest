@@ -9,13 +9,10 @@ import android.content.Intent;
 import android.graphics.BitmapFactory;
 import android.os.Binder;
 import android.os.Build;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
 import android.support.v4.app.NotificationCompat;
 import android.util.Log;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -27,29 +24,25 @@ import java.net.InetSocketAddress;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.util.concurrent.TimeUnit;
-
-import android.widget.Toast;
-
-import com.blankj.utilcode.util.ToastUtils;
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-
 import io.reactivex.Observable;
 import io.reactivex.Observer;
 import io.reactivex.disposables.Disposable;
+import io.reactivex.functions.Consumer;
+import io.reactivex.schedulers.Schedulers;
 
 public class SocketService extends Service {
     /*socket*/
     private Socket socket;
     /*连接线程*/
     private Thread connectThread;
-    private Timer timer = new Timer();
     private OutputStream outputStream;
 
     private SocketBinder sockerBinder = new SocketBinder();
     private final String ip = "192.168.4.1";
     private final int port = 8080;
-    private TimerTask task;
+
+    private Disposable timerSubscription;
 
     private PendingIntent pendingIntent;
     private NotificationManager manager;
@@ -199,34 +192,41 @@ public class SocketService extends Service {
 
     //接收数据服务器发来的消息
     public void receive(){
+        Observable.just(1)
+                .subscribe(new Observer<Integer>() {
 
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (!socket.isClosed() && socket.isConnected()) {//如果服务器没有关闭
-                        InputStream inputStream = socket.getInputStream();
-                        byte[] buffer = new byte[1024];
-                        inputStream.read(buffer);
-//                        callback.onFail(0,new String(buffer));
-//                        callback.onFail(0,String.valueOf(new String(buffer).length()));
-//                        callback.onFail(0,String.valueOf(new String(buffer).trim().length()));
-                        ReceviceBean result = new Gson().fromJson(new String(buffer).trim(),ReceviceBean.class);
-                        if (!result.getCode().equals("200")){
-                            callback.onFail(Integer.valueOf(result.getCode()),result.getMessage());
-                            showNotification(result.getMessage());
-                        }else {
-                            callback.onSuccess(result.getData().getCardID());
-                            releaseSocket(false);
-                            stopSelf();
+                    @Override
+                    public void onError(Throwable e) { }
+
+                    @Override
+                    public void onComplete() { }
+
+                    @Override
+                    public void onSubscribe(Disposable d) { }
+
+                    @Override
+                    public void onNext(Integer integer) {
+                        try {
+                            if (!socket.isClosed() && socket.isConnected()) {//如果服务器没有关闭
+                                InputStream inputStream = socket.getInputStream();
+                                byte[] buffer = new byte[1024];
+                                inputStream.read(buffer);
+                                ReceviceBean result = new Gson().fromJson(new String(buffer).trim(),ReceviceBean.class);
+                                if (!result.getCode().equals("200")){
+                                    callback.onFail(Integer.valueOf(result.getCode()),result.getMessage());
+                                    showNotification(result.getMessage());
+                                }else {
+                                    callback.onSuccess(result.getData().getCardID());
+                                    releaseSocket(false);
+                                    stopSelf();
+                                }
+                            }
+                        } catch (Exception e) {
+                            e.printStackTrace();
                         }
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-        }).start();
 
+                    }
+                });
     }
 
 
@@ -234,27 +234,35 @@ public class SocketService extends Service {
     private void sendOrder(final int order) {
         if (socket != null && socket.isConnected()) {
             /*发送指令*/
-            new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        if ((outputStream = socket.getOutputStream()) != null) {
-                            CardInfoBean cardInfo = new CardInfoBean();
-                            cardInfo.setOperation(order);
-                            outputStream.write((new Gson().toJson(cardInfo)).getBytes("UTF-8"));
-                            outputStream.flush();
-                            callback.onFail(0,"发送了:"+(new Gson().toJson(cardInfo)));
-                            receive();
-                        }else {
-                            callback.onFail(0,"outputStream为空");
+            Observable.just(order)
+                    .subscribe(new Observer<Integer>() {
+                        @Override
+                        public void onSubscribe(Disposable d) { }
+
+                        @Override
+                        public void onError(Throwable e) { }
+
+                        @Override
+                        public void onComplete() { }
+
+                        @Override
+                        public void onNext(Integer integer) {
+                            try {
+                                if ((outputStream = socket.getOutputStream()) != null) {
+                                    CardInfoBean cardInfo = new CardInfoBean();
+                                    cardInfo.setOperation(order);
+                                    outputStream.write((new Gson().toJson(cardInfo)).getBytes("UTF-8"));
+                                    outputStream.flush();
+                                    callback.onFail(0,"发送了:"+(new Gson().toJson(cardInfo)));
+                                    receive();
+                                }else {
+                                    callback.onFail(0,"outputStream为空");
+                                }
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
                         }
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-
-                }
-            }).start();
-
+                    });
         } else {
             callback.onFail(0,"socket连接错误,请重试");
         }
@@ -263,44 +271,44 @@ public class SocketService extends Service {
 
     /*发送心跳包数据*/
     private void sendBeatData() {
-        if (timer == null) {
-            timer = new Timer();
-        }
-        if (task == null) {
-            task = new TimerTask() {
-                @Override
-                public void run() {
-                    try {
-                        outputStream = socket.getOutputStream();
-                        /*这里的编码方式根据你的需求去改*/
-                        outputStream.write(("android_beat").getBytes("UTF-8"));
-                        outputStream.flush();
-                    } catch (Exception e) {
-                        /*发送失败说明socket断开了或者出现了其他错误*/
-                        callback.onFail(0,"连接断开，正在重连");
-                        /*重连*/
-                        releaseSocket(true);
-                        e.printStackTrace();
+        timerSubscription = Observable.interval(0, 3000, TimeUnit.MILLISECONDS)
+                .subscribeOn(Schedulers.io())
+                .subscribe(new Consumer<Long>() {
+                    @Override
+                    public void accept(Long aLong) throws Exception {
+                        try {
+                            /*这里的编码方式根据你的需求去改*/
+                            outputStream = socket.getOutputStream();
+                            outputStream.write(("android_beat").getBytes("UTF-8"));
+                            outputStream.flush();
+                            callback.onFail(0, "发送了心跳包");
+                        } catch (IOException e) {
+                            /*发送失败说明socket断开了或者出现了其他错误*/
+                            callback.onFail(0, "连接断开，正在重连");
+                            /*重连*/
+                            releaseSocket(true);
+                            e.printStackTrace();
+                        }
                     }
-                }
-            };
-        }
-        timer.schedule(task, 0, 3000);
 
+                });
     }
 
 
     /*释放资源，是否重连*/
     private void releaseSocket(Boolean isReConnect) {
 
-        if (task != null) {
-            task.cancel();
-            task = null;
-        }
-        if (timer != null) {
-            timer.purge();
-            timer.cancel();
-            timer = null;
+//        if (task != null) {
+//            task.cancel();
+//            task = null;
+//        }
+//        if (timer != null) {
+//            timer.purge();
+//            timer.cancel();
+//            timer = null;
+//        }
+        if (timerSubscription != null && !timerSubscription.isDisposed()) {
+            timerSubscription.dispose();
         }
 
         if (outputStream != null) {
